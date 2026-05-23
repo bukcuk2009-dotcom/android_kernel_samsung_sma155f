@@ -1,0 +1,251 @@
+name: Build KernelSU-Next + SUSFS (v6.4)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Nhánh cần build'
+        required: true
+        default: 'kernelsunext'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.1.7
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex libssl-dev make libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            python3 2to3 wget unzip lz4 tar zip \
+            python-is-python3 ccache cpio rsync
+
+      - name: Cache ccache
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.1.2
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-v6.4-${{ hashFiles('kernel-5.10/arch/arm64/configs/a15_00_defconfig') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-v6.4-
+            ${{ runner.os }}-ccache-
+
+      - name: Prepare images
+        run: |
+          for f in boot.img.lz4 vendor_boot.img.lz4; do
+            if [ -f "$f" ]; then
+              lz4 -d -f "$f" "$(basename "$f" .lz4)"
+              echo "$(basename "$f" .lz4): $(stat -c%s "$(basename "$f" .lz4)") bytes"
+            else
+              echo "ERROR: $f not found!"
+              exit 1
+            fi
+          done
+
+      - name: Patch defconfig for KSU-Next + SUSFS
+        run: |
+          DEF="kernel-5.10/arch/arm64/configs/a15_00_defconfig"
+          CFG="./kernel-5.10/scripts/config"
+
+          $CFG --file "$DEF" \
+            --disable UH --disable RKP --disable KDP \
+            --disable SECURITY_DEFEX --disable INTEGRITY --disable FIVE \
+            --disable TRIM_UNUSED_KSYMS \
+            --disable PROCA --disable PROCA_GKI_10 --disable PROCA_S_OS \
+            --disable PROCA_CERTIFICATES_XATTR --disable PROCA_CERT_ENG --disable PROCA_CERT_USER \
+            --disable GAF_V6 --disable FIVE_CERT_USER --disable FIVE_DEFAULT_HASH \
+            --disable UH_RKP --disable UH_LKMAUTH --disable UH_LKM_BLOCK \
+            --disable RKP_CFP_JOPP --disable RKP_CFP \
+            --disable KDP_CRED --disable KDP_NS --disable KDP_TEST --disable RKP_CRED
+
+          $CFG --file "$DEF" \
+            --disable TCP_CONG_BIC --disable TCP_CONG_WESTWOOD --disable TCP_CONG_HTCP \
+            --disable DEFAULT_BIC --disable DEFAULT_RENO --disable DEFAULT_CUBIC
+
+          $CFG --file "$DEF" \
+            --enable TMPFS_XATTR --enable TMPFS_POSIX_ACL \
+            --enable IP_NF_TARGET_TTL --enable IP6_NF_TARGET_HL --enable IP6_NF_MATCH_HL \
+            --enable TCP_CONG_ADVANCED --enable TCP_CONG_BBR --enable NET_SCH_FQ --enable DEFAULT_BBR \
+            --enable OVERLAY_FS \
+            --enable MODULES --enable MODULE_FORCE_LOAD --enable MODULE_UNLOAD --enable MODULE_FORCE_UNLOAD \
+            --enable KPROBES --enable KPROBE_EVENTS --enable KALLSYMS_ALL \
+            --enable NETFILTER_XT_MATCH_OWNER --enable IP_NF_MANGLE --enable SECURITY
+
+          $CFG --file "$DEF" --enable KSU
+
+          $CFG --file "$DEF" \
+            --disable KSU_WITH_KPROBES \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_HAS_MAGIC_MOUNT \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            --enable KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --disable KSU_SUSFS_SUS_OVERLAYFS \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --disable KSU_SUSFS_SUS_SU
+
+          $CFG --file "$DEF" \
+            --disable BLK_DEV_SSG --disable MTK_GED --disable MTK_BLOCKTAG --disable TZDEV
+
+          $CFG --file "$DEF" --set-str DEFAULT_TCP_CONG "bbr"
+
+          echo "=== Key configs ==="
+          grep -E "^(CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_OVERLAY_FS)" "$DEF" || true
+
+      - name: Generate build.config
+        run: |
+          mkdir -p out/target/product/a15/obj/KERNEL_OBJ
+
+          PY_SCRIPT="kernel-5.10/scripts/gen_build_config.py"
+          if python3 -c "
+          import ast, sys
+          try:
+              ast.parse(open('$PY_SCRIPT').read())
+              sys.exit(0)
+          except SyntaxError:
+              sys.exit(1)
+          "; then
+            echo "gen_build_config.py syntax OK"
+          else
+            echo "Syntax error detected, running 2to3..."
+            2to3 -w "$PY_SCRIPT"
+          fi
+
+          cd kernel-5.10
+          python3 scripts/gen_build_config.py \
+            --kernel-defconfig a15_00_defconfig \
+            --kernel-defconfig-overlays "entry_level.config" \
+            -m user \
+            -o ../out/target/product/a15/obj/KERNEL_OBJ/build.config
+          cd ..
+
+      - name: Build kernel
+        run: |
+          export USE_CCACHE=1
+          export CCACHE_DIR=$HOME/.ccache
+          export PATH="/usr/lib/ccache:$PATH"
+          ccache -M 4G
+
+          cd kernel-5.10
+
+          # Patch source code
+          sed -i '/android_oem_data1/s/^/\/\//' mm/swapfile.c
+          grep -n "android_oem_data1" mm/swapfile.c || echo "swapfile.c OK"
+
+          sed -i 's/rqi->blkg = blkg_lookup(css_to_blkcg(blkcg_css()), rq->q);/rqi->blkg = NULL; \/\/ samsung-api-removed/' block/ssg-iosched.c
+
+          sed -i "s/page->mem_cgroup->swappiness/0 \/* samsung-removed *\//g" drivers/block/zram/zram_drv.c
+          sed -i "s/page->mem_cgroup/NULL \/* samsung-removed *\//g" drivers/block/zram/zram_drv.c
+          sed -i "/\.android_oem_data1[[:space:]]*=/{s/^/\/\//}" drivers/block/zram/zram_drv.c
+
+          sed -i 's|#include "disp_arr.h"|// #include "disp_arr.h" // patched|' drivers/gpu/mediatek/ged/src/ged_kpi.c
+
+          sed -i '/obj-\$(CONFIG_MTK_BLOCKTAG)/d' drivers/misc/mediatek/Makefile
+
+          if [ -f drivers/misc/mediatek/blocktag/Makefile ]; then
+            echo "# Patched: blocktag removed" > drivers/misc/mediatek/blocktag/Makefile
+          fi
+
+          if [ -f drivers/misc/mediatek/blocktag/blocktag-index.c ]; then
+            sed -i '/\.proc_compat_ioctl/s/^/\/\//' drivers/misc/mediatek/blocktag/blocktag-index.c
+          fi
+
+          if [ -f drivers/misc/mediatek/apusys/power/2.5/common/apu-driver.c ]; then
+            sed -i 's|#include.*devfreq/governor\.h.*|// & // patched|' drivers/misc/mediatek/apusys/power/2.5/common/apu-driver.c
+          fi
+
+          cd ..
+
+          export KCFLAGS="-Wno-error=format= -Wno-error=format-extra-args -Wno-error=implicit-function-declaration -Wno-error=unused-function -Wno-error=misleading-indentation -Wno-error=unused-label -Wno-implicit-fallthrough -Wno-strict-prototypes -Wno-error=stringop-overread -Wno-error=parentheses -Wno-error=unused-variable -Wno-error=unused-result -Wno-error=uninitialized -Wno-error=frame-larger-than= -Wno-error=format-zero-length"
+
+          chmod +x build.sh
+          ./build.sh
+
+          ccache -s
+
+      - name: Locate kernel Image
+        run: |
+          echo "=== Searching for Image ==="
+          find out/ -name "Image*" 2>/dev/null | sort
+          IMG=$(find out/ -name "Image" -type f 2>/dev/null | head -1)
+          [ -z "$IMG" ] && IMG=$(find out/ -name "Image.gz" -type f 2>/dev/null | head -1)
+          [ -z "$IMG" ] && echo "ERROR: Image not found!" && exit 1
+          echo "KERNEL_IMAGE=$IMG" >> $GITHUB_ENV
+          ls -lh "$IMG"
+
+      - name: Repack boot image
+        run: |
+          mkdir -p kernel-5.10/arch/arm64/boot
+          if echo "$KERNEL_IMAGE" | grep -q "\.gz$"; then
+            cp "$KERNEL_IMAGE" kernel-5.10/arch/arm64/boot/Image.gz
+            gunzip -k -f kernel-5.10/arch/arm64/boot/Image.gz
+          else
+            cp "$KERNEL_IMAGE" kernel-5.10/arch/arm64/boot/Image
+            gzip -9 -c kernel-5.10/arch/arm64/boot/Image > kernel-5.10/arch/arm64/boot/Image.gz
+          fi
+
+          chmod +x scripts/repack
+          ./scripts/repack
+          ls -lh boot.img
+
+      - name: Create Odin tar
+        run: |
+          tar -cvf KSU-Next-SUSFS-A155F.tar boot.img vendor_boot.img
+          ls -lh KSU-Next-SUSFS-A155F.tar
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: KSU-Next-SUSFS-A155F-v6.4-${{ github.run_number }}
+          path: |
+            boot.img
+            vendor_boot.img
+            KSU-Next-SUSFS-A155F.tar
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Create Release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631  # v2.x
+        with:
+          tag_name: KSU-Next-SUSFS-v${{ github.run_number }}-${{ github.run_attempt }}
+          name: "KernelSU-Next + SUSFS A155F CYG3 — Build #${{ github.run_number }}"
+          body: |
+            ## KernelSU-Next + SUSFS cho SM-A155F (v6.4)
+
+            **Firmware:** A155FXXS7CYG3
+            **Nhánh:** ${{ github.event.inputs.branch }}
+
+            ### Tính năng:
+            - KernelSU-Next + SUSFS (mount ẩn, spoof uname, hide symbols...)
+            - TCP BBR mặc định
+            - Tắt Samsung security / PROCA / RKP / KDP
+
+            ### Hướng dẫn flash:
+            > ⚠️ Cần tắt dm-verity trước khi flash
+            > **Odin:** Chọn AP và nạp file `.tar`
+            > **Fastboot:** Flash `boot.img` và `vendor_boot.img`
+          files: |
+            boot.img
+            vendor_boot.img
+            KSU-Next-SUSFS-A155F.tar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
