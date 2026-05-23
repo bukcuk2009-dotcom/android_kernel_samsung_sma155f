@@ -175,6 +175,9 @@ jobs:
 
           cd ..
 
+          # SỬA LỖI THIẾU PYTHON2 TRONG build.sh
+          sed -i 's/python2/python3/g' build.sh
+
           export KCFLAGS="-Wno-error=format= -Wno-error=format-extra-args -Wno-error=implicit-function-declaration -Wno-error=unused-function -Wno-error=misleading-indentation -Wno-error=unused-label -Wno-implicit-fallthrough -Wno-strict-prototypes -Wno-error=stringop-overread -Wno-error=parentheses -Wno-error=unused-variable -Wno-error=unused-result -Wno-error=uninitialized -Wno-error=frame-larger-than= -Wno-error=format-zero-length"
 
           chmod +x build.sh
