@@ -1,4 +1,4 @@
-name: Build KernelSU-Next (Final v6.1)
+name: Build KernelSU-Next (Final v6.2)
 
 on:
   workflow_dispatch:
@@ -33,16 +33,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git bc bison flex libssl-dev make libelf-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            python3 wget unzip lz4 tar zip \
+            python3 2to3 wget unzip lz4 tar zip \
             python-is-python3 ccache cpio rsync
 
       - name: Cache ccache
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.1.2
         with:
           path: ~/.ccache
-          key: ${{ runner.os }}-ccache-v6.1-${{ hashFiles('kernel-5.10/arch/arm64/configs/a15_00_defconfig', 'kernel-5.10/Makefile') }}
+          key: ${{ runner.os }}-ccache-v6.2-${{ hashFiles('kernel-5.10/arch/arm64/configs/a15_00_defconfig', 'kernel-5.10/Makefile') }}
           restore-keys: |
-            ${{ runner.os }}-ccache-v6.1-
+            ${{ runner.os }}-ccache-v6.2-
             ${{ runner.os }}-ccache-
 
       - name: Setup toolchain
@@ -172,14 +172,34 @@ jobs:
           mkdir -p out/target/product/a15/obj/KERNEL_OBJ
           mkdir -p out/dist
 
-          cd kernel-5.10
-          # Theo README gốc: dùng python (không phải python3)
-          python scripts/gen_build_config.py \
-            --kernel-defconfig a15_00_defconfig \
-            --kernel-defconfig-overlays "entry_level.config" \
-            -m user \
-            -o ../out/target/product/a15/obj/KERNEL_OBJ/build.config
-          cd ..
+          PY_SCRIPT="kernel-5.10/scripts/gen_build_config.py"
+          if [ ! -f "$PY_SCRIPT" ]; then
+            echo "gen_build_config.py not found — skipping 2to3 check"
+          else
+            if python3 -c "
+            import ast, sys
+            try:
+                ast.parse(open('$PY_SCRIPT').read())
+                sys.exit(0)
+            except SyntaxError:
+                sys.exit(1)
+            "; then
+              echo "gen_build_config.py syntax OK, no fix needed"
+            else
+              echo "Syntax error detected, running 2to3..."
+              2to3 -w "$PY_SCRIPT"
+            fi
+
+            cd kernel-5.10
+            OVERLAY_ARG=""
+            [ -f entry_level.config ] && OVERLAY_ARG="--kernel-defconfig-overlays entry_level.config"
+            python3 scripts/gen_build_config.py \
+              --kernel-defconfig a15_00_defconfig \
+              $OVERLAY_ARG \
+              -m user \
+              -o ../out/target/product/a15/obj/KERNEL_OBJ/build.config
+            cd ..
+          fi
 
       - name: Build kernel
         run: |
@@ -351,15 +371,15 @@ jobs:
           tag_name: KSU-Next-CYG3-v${{ github.run_number }}-${{ github.run_attempt }}
           name: "KernelSU-Next A155F CYG3 — Build #${{ github.run_number }} (attempt ${{ github.run_attempt }})"
           body: |
-            ## KernelSU-Next cho SM-A155F — Final v6.1
+            ## KernelSU-Next cho SM-A155F — Final v6.2
 
             **Firmware gốc tương thích:** A155FXXS7CYG3
 
-            ### Thay đổi trong v6.1:
+            ### Thay đổi trong v6.2:
+            - 🔧 Sửa lỗi Python syntax: tự động dùng `2to3` nếu `gen_build_config.py` là Python 2
             - ✅ Tích hợp đầy đủ KSU-Next + SUSFS từ README gốc
             - ✅ Dùng `build_kernel.sh` (theo hướng dẫn)
-            - ✅ Tất cả bản vá source và KCFLAGS từ 30+ lần chạy
-            - ✅ Disable driver không tương thích (blocktag, apusys, tzdev...)
+            - ✅ Tất cả bản vá source và KCFLAGS từ các lần chạy trước
 
             ### Lưu ý trước khi flash:
             > ⚠️ Đảm bảo đã vô hiệu hóa `dm-verity` (flash `vbmeta` với `--disable-verity`)
