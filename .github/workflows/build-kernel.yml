@@ -1,7 +1,12 @@
-name: Build KernelSU-Next + SUSFS (v6.3)
+name: Build KernelSU-Next + SUSFS (v6.4)
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Nhánh cần build'
+        required: true
+        default: 'kernelsunext'
 
 permissions:
   contents: write
@@ -15,7 +20,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.1.7
         with:
-          ref: kernelsunext
+          ref: ${{ github.event.inputs.branch }}
           fetch-depth: 1
 
       - name: Install dependencies
@@ -31,9 +36,9 @@ jobs:
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.1.2
         with:
           path: ~/.ccache
-          key: ${{ runner.os }}-ccache-v6.3-${{ hashFiles('kernel-5.10/arch/arm64/configs/a15_00_defconfig') }}
+          key: ${{ runner.os }}-ccache-v6.4-${{ hashFiles('kernel-5.10/arch/arm64/configs/a15_00_defconfig') }}
           restore-keys: |
-            ${{ runner.os }}-ccache-v6.3-
+            ${{ runner.os }}-ccache-v6.4-
             ${{ runner.os }}-ccache-
 
       - name: Prepare images
@@ -53,7 +58,6 @@ jobs:
           DEF="kernel-5.10/arch/arm64/configs/a15_00_defconfig"
           CFG="./kernel-5.10/scripts/config"
 
-          # Disable Samsung security
           $CFG --file "$DEF" \
             --disable UH --disable RKP --disable KDP \
             --disable SECURITY_DEFEX --disable INTEGRITY --disable FIVE \
@@ -65,12 +69,10 @@ jobs:
             --disable RKP_CFP_JOPP --disable RKP_CFP \
             --disable KDP_CRED --disable KDP_NS --disable KDP_TEST --disable RKP_CRED
 
-          # Disable old TCP congestion
           $CFG --file "$DEF" \
             --disable TCP_CONG_BIC --disable TCP_CONG_WESTWOOD --disable TCP_CONG_HTCP \
             --disable DEFAULT_BIC --disable DEFAULT_RENO --disable DEFAULT_CUBIC
 
-          # Enable required features
           $CFG --file "$DEF" \
             --enable TMPFS_XATTR --enable TMPFS_POSIX_ACL \
             --enable IP_NF_TARGET_TTL --enable IP6_NF_TARGET_HL --enable IP6_NF_MATCH_HL \
@@ -80,10 +82,8 @@ jobs:
             --enable KPROBES --enable KPROBE_EVENTS --enable KALLSYMS_ALL \
             --enable NETFILTER_XT_MATCH_OWNER --enable IP_NF_MANGLE --enable SECURITY
 
-          # Enable KSU
           $CFG --file "$DEF" --enable KSU
 
-          # Enable SUSFS
           $CFG --file "$DEF" \
             --disable KSU_WITH_KPROBES \
             --enable KSU_SUSFS \
@@ -103,11 +103,9 @@ jobs:
             --enable KSU_SUSFS_OPEN_REDIRECT \
             --disable KSU_SUSFS_SUS_SU
 
-          # Disable problematic drivers
           $CFG --file "$DEF" \
             --disable BLK_DEV_SSG --disable MTK_GED --disable MTK_BLOCKTAG --disable TZDEV
 
-          # Set BBR as default TCP congestion
           $CFG --file "$DEF" --set-str DEFAULT_TCP_CONG "bbr"
 
           echo "=== Key configs ==="
@@ -177,7 +175,6 @@ jobs:
 
           cd ..
 
-          # Build with KCFLAGS
           export KCFLAGS="-Wno-error=format= -Wno-error=format-extra-args -Wno-error=implicit-function-declaration -Wno-error=unused-function -Wno-error=misleading-indentation -Wno-error=unused-label -Wno-implicit-fallthrough -Wno-strict-prototypes -Wno-error=stringop-overread -Wno-error=parentheses -Wno-error=unused-variable -Wno-error=unused-result -Wno-error=uninitialized -Wno-error=frame-larger-than= -Wno-error=format-zero-length"
 
           chmod +x build.sh
@@ -218,7 +215,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: KSU-Next-SUSFS-A155F-v6.3-${{ github.run_number }}
+          name: KSU-Next-SUSFS-A155F-v6.4-${{ github.run_number }}
           path: |
             boot.img
             vendor_boot.img
@@ -232,9 +229,10 @@ jobs:
           tag_name: KSU-Next-SUSFS-v${{ github.run_number }}-${{ github.run_attempt }}
           name: "KernelSU-Next + SUSFS A155F CYG3 — Build #${{ github.run_number }}"
           body: |
-            ## KernelSU-Next + SUSFS cho SM-A155F (v6.3)
+            ## KernelSU-Next + SUSFS cho SM-A155F (v6.4)
 
             **Firmware:** A155FXXS7CYG3
+            **Nhánh:** ${{ github.event.inputs.branch }}
 
             ### Tính năng:
             - KernelSU-Next + SUSFS (mount ẩn, spoof uname, hide symbols...)
@@ -242,7 +240,7 @@ jobs:
             - Tắt Samsung security / PROCA / RKP / KDP
 
             ### Hướng dẫn flash:
-            > ⚠️ Cần tắt dm-verity trước khi flash (dùng `vbmeta.img` đã patch)
+            > ⚠️ Cần tắt dm-verity trước khi flash
             > **Odin:** Chọn AP và nạp file `.tar`
             > **Fastboot:** Flash `boot.img` và `vendor_boot.img`
           files: |
